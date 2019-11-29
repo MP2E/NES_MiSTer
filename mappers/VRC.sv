@@ -357,6 +357,241 @@ vrcIRQ vrc4irq(clk,enable,prg_write,{irqlh,irqll},irqc,irqa,prg_din,irqout,ce);
 
 endmodule
 
+// VRC5 (547)
+module VRC5(
+	input        clk,         // System clock
+	input        ce,          // M2 ~cpu_clk
+	input        enable,      // Mapper enabled
+	input [31:0] flags,       // Cart flags
+	input [15:0] prg_ain,     // prg address
+	inout [21:0] prg_aout_b,  // prg address out
+	input        prg_read,    // prg read
+	input        prg_write,   // prg write
+	input  [7:0] prg_din,     // prg data in
+	inout  [7:0] prg_dout_b,  // prg data out
+	inout        prg_allow_b, // Enable access to memory for the specified operation.
+	input [13:0] chr_ain,     // chr address in
+	inout [21:0] chr_aout_b,  // chr address out
+	input        chr_read,    // chr ram read
+	inout        chr_allow_b, // chr allow write
+	inout        vram_a10_b,  // Value for A10 address line
+	inout        vram_ce_b,   // True if the address should be routed to the internal 2kB VRAM.
+	inout        irq_b,       // IRQ
+	input [15:0] audio_in,    // Inverted audio from APU
+	inout [15:0] audio_b,     // Mixed audio output
+	inout [15:0] flags_out_b, // flags {0, 0, 0, 0, 0, prg_conflict, prg_bus_write, has_chr_dout}
+	// Special ports
+	input  [7:0] chr_din,     // CHR Data in
+	input        chr_write,   // CHR Write
+	inout  [7:0] chr_dout_b,  // chr data (non standard)
+	input        ppu_ce,
+	input [19:0] ppuflags
+);
+
+assign prg_aout_b   = enable ? prg_aout : 22'hZ;
+assign prg_dout_b   = enable ? prg_dout : 8'hZ;
+assign prg_allow_b  = enable ? prg_allow : 1'hZ;
+assign chr_aout_b   = enable ? chr_aout : 22'hZ;
+assign chr_dout_b   = enable ? chr_dout : 8'hZ;
+assign chr_allow_b  = enable ? chr_allow : 1'hZ;
+assign vram_a10_b   = enable ? vram_a10 : 1'hZ;
+assign vram_ce_b    = enable ? vram_ce : 1'hZ;
+assign irq_b        = enable ? irq : 1'hZ;
+assign flags_out_b  = enable ? flags_out : 16'hZ;
+assign audio_b      = enable ? {1'b0, audio_in[15:1]} : 16'hZ;
+
+wire [21:0] prg_aout, chr_aout;
+wire [7:0] prg_dout, chr_dout;
+wire prg_allow, chr_allow;
+reg vram_a10;
+wire vram_ce;
+wire [15:0] flags_out = {14'h0, prg_bus_write, has_chr_dout};
+wire prg_bus_write, has_chr_dout;
+
+wire prg_is_ram;
+wire [21:0] prg_ram;
+wire [6:0] prg_tmp;
+
+reg prg_chip0, prg_chip1, prg_chip2;
+reg [5:0] prg_bank0, prg_bank1, prg_bank2;
+
+reg wram_chip0, wram_chip1;
+reg wram_bank0, wram_bank1;
+
+reg chr_bank;
+reg [1:0] chr_latch_count;
+reg [7:0] chr_latch_data;
+
+reg irq;
+reg [1:0]  irq_enable;
+reg [15:0] irq_latch;
+reg [15:0] irq_counter;
+
+reg [7:0] qtram [0:2047];
+reg qtram_enable;
+reg mirroring;
+
+// unpack ppu flags
+wire ppu_in_frame = ppuflags[0];
+wire [8:0] ppu_cycle = ppuflags[10:2];
+wire [8:0] ppu_scanline = ppuflags[19:11];
+
+reg [1:0] jis_position;
+reg jis_attribute;
+reg [6:0] jis_column, jis_row;
+
+reg [7:0] jis_data;
+
+localparam bit [7:0] jis_table[0:3][0:7] = '{
+    '{8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00},
+    '{8'h00, 8'h00, 8'h40, 8'h10, 8'h28, 8'h00, 8'h18, 8'h30},
+    '{8'h00, 8'h00, 8'h48, 8'h18, 8'h30, 8'h08, 8'h20, 8'h38},
+    '{8'h00, 8'h00, 8'h80, 8'h20, 8'h38, 8'h10, 8'h28, 8'hb0}
+};
+
+always @(posedge clk) begin
+	if (~enable) begin
+		{prg_chip0, prg_chip1, prg_chip2} <= 0;
+		{prg_bank0, prg_bank1, prg_bank2} <= 0;
+		{wram_chip0, wram_chip1} <= 0;
+		{wram_bank0, wram_bank1} <= 0;
+		chr_bank <= 0;
+		{irq, irq_enable, irq_latch, irq_counter} <= 0;
+		qtram <= '{default:0}
+		qtram_enable <= 0;
+		mirroring <= 0;
+		{jis_position, jis_attribute, jis_column, jis_row} <= 0;
+	end else if (ce) begin
+		if ((prg_ain[15:12] == 4'hd) && prg_write) begin
+			case (prg_ain[11:8])
+			4'h0: {wram_chip0,wram_bank0} <= {prg_din[3],prg_din[0]}; // PRG bank 0x6000-0x6FFF
+			4'h1: {wram_chip1,wram_bank1} <= {prg_din[3],prg_din[0]}; // PRG bank 0x7000-0x7FFF
+
+			4'h2: {prg_chip0,prg_bank0} <= prg_din[6:0];              // PRG bank 0x8000-0x9FFF
+			4'h3: {prg_chip1,prg_bank1} <= prg_din[6:0];              // PRG bank 0xA000-0xBFFF
+			4'h4: {prg_chip2,prg_bank2} <= prg_din[6:0];              // PRG bank 0xC000-0xDFFF
+
+			4'h5: chr_bank <= prg_din[0];                             // CHR bank 0x0000-0x0FFF
+
+			4'h6: irq_latch[7:0] <= prg_din;
+			4'h7: irq_latch[15:8] <= prg_din;
+			4'h8: begin
+				irq_enable[1] <= irq_enable[0];
+				irq <= 0;                                             // IRQ Acknowledge
+			end
+			4'h9: begin
+				irq_enable <= prg_din[1:0];
+				irq_counter <= irq_latch;
+				irq <= 0;                                             // IRQ Acknowledge
+			end
+
+			4'ha: {mirroring,qtram_enable} <= prg_din[1:0];
+
+			4'hb: {jis_attribute,jis_position} <= prg_din[2:0];
+			4'hc: jis_column <= prg_din[6:0];
+			4'hd: jis_row <= prg_din[6:0];
+			endcase
+		end
+
+		if (irq_enable[1]) begin
+			irq_counter <= irq_counter + 1'b1;
+			if (irq_counter == 16'h0000) begin
+				irq_counter <= irq_latch;
+				irq <= 1'b1;
+			end
+		end
+
+	end
+end
+
+always_comb begin
+	// mirroring mode
+	case(mirroring)
+		1'b0 : vram_a10 <= chr_ain[10];    // vertical
+		1'b1 : vram_a10 <= chr_ain[11];    // horizontal
+	endcase
+end
+
+always_comb begin
+	// PRG ROM bank size select
+	case(prg_ain[15:13])
+		// if the chip bit is set to 0, only take the 4 least significant bank bits
+		3'b100  : prg_tmp <= prg_chip0 ? {{1'b0,prg_bank0} + {2'h0,prg_chip0,4'h0}} : {3'h0,prg_bank0[3:0]};
+		3'b101  : prg_tmp <= prg_chip1 ? {{1'b0,prg_bank1} + {2'h0,prg_chip1,4'h0}} : {3'h0,prg_bank1[3:0]};
+		3'b110  : prg_tmp <= prg_chip2 ? {{1'b0,prg_bank2} + {2'h0,prg_chip2,4'h0}} : {3'h0,prg_bank2[3:0]};
+		3'b111  : prg_tmp <= 7'b1001_111; // last bank in external PRG ROM
+		default : prg_tmp <= {4'd0, prg_ain[15:13]};
+	endcase
+end
+
+//converts JIS X 0208 codepoint to CIRAM tile# + QTRAM bank#
+always @(posedge clk) begin
+   if (~enable) begin
+     jis_data = 0;
+   end else if (ce) begin
+	   jis_data = jis_table[jis_column[6:5]][jis_row[6:4]];
+	   if (prg_ain[15:8] == 8'hDC) begin
+		    // read translated tile number to be written to CIRAM
+		    prg_dout <= {jis_row[0],jis_column[4:0],jis_position};
+	   end else if (prg_ain[15:8] == 8'hDD) begin
+		    // read translated bank byte to be written to QTRAM
+		    if (jis_data[6]) begin
+			     prg_dout <= {5'h0,jis_row[3:1]} | {2'b01,jis_data[5:0]} | {jis_attribute,7'h0} & 8'hFB;
+		    end else if (jis_data[7]) begin
+			     prg_dout <= {5'h0,jis_row[3:1]} | {2'b01,jis_data[5:0]} | {jis_attribute,7'h0} | 8'h04;
+		    end else begin
+			     prg_dout <= {5'h0,jis_row[3:1]} | {2'b01,jis_data[5:0]} | {jis_attribute,7'h0};
+		    end
+	   end else begin
+		    prg_dout <= 8'hFF;
+	   end
+	end
+end
+
+always @(posedge clk) begin
+	if (~enable) begin
+		chr_latch_count <= 0;
+		chr_latch_data <= 0;
+		qtram <= '{default:0};
+	end else if (ppu_ce) begin
+		if (!chr_write) begin
+			if (!chr_ain[13] && |chr_latch_count) begin
+				chr_latch_count <= chr_latch_count - 1'b1;
+				if (chr_latch_data[6] && chr_ain[3])
+					chr_dout = chr_latch_data[7] ? 8'hFF : 8'h00;
+			end else if (chr_ain[13]) begin
+				// hack: how does VRC5 determine nametable entries for backgrounds are being fetched?
+				if ((~|ppu_cycle[2:0]) && (ppu_cycle < 256 || (ppu_cycle >= 320 && ppu_cycle < 336))) begin
+					chr_latch_count <= 2'b10;
+					chr_latch_data  <= qtram[chr_ain[10:0]];
+				end
+
+				if (qtram_enable) begin
+					chr_dout = qtram[chr_ain[10:0]];
+				end
+			end
+		end else if (chr_write && chr_ain[13] && qtram_enable) begin
+			qtram[chr_ain[10:0]] <= chr_din;
+		end
+	end
+end
+
+wire   is_chr_redirect = !chr_write && (!chr_ain[13] && |chr_latch_count);
+assign chr_aout = is_chr_redirect ? (chr_latch_data[6] ? {5'b10_000, chr_latch_data[5:0], chr_ain[11:5], chr_ain[2:0], chr_ain[4]}
+                                                       : {9'b11_1111_111, chr_latch_data[0], chr_ain[11:0]})
+                                                       : {9'b11_1111_111, {chr_ain[12] ? 1'b1 : chr_bank}, chr_ain[11:0]};
+assign has_chr_dout = (!chr_ain[13] && |chr_latch_count && chr_latch_data[6] && chr_ain[3]) || (chr_ain[13] && qtram_enable);
+assign prg_bus_write = (prg_ain[15:8] == 8'hDC) || (prg_ain[15:8] == 8'hDD);
+assign vram_ce = chr_ain[13] && !qtram_enable;
+assign prg_aout = prg_is_ram ? prg_ram : {2'b00, prg_tmp, prg_ain[12:0]};
+assign prg_is_ram = prg_ain[15:13] == 3'b011; // 0x6000-0x7FFF points to PRG-RAM
+assign prg_ram = prg_ain[12] ? {6'b11_1100,wram_chip1,2'b00,wram_bank1,prg_ain[11:0]}
+							 : {6'b11_1100,wram_chip0,2'b00,wram_bank0,prg_ain[11:0]};
+assign prg_allow = (prg_ain[15] && !prg_write) || prg_is_ram;
+assign chr_allow = !(chr_ain[13] && qtram_enable); // disable writes to CHR RAM if we're writing to QTRAM
+
+endmodule
+
 module VRC6(
 	input        clk,         // System clock
 	input        ce,          // M2 ~cpu_clk

@@ -1310,6 +1310,43 @@ VRC24 vrc24(
 );
 
 //*****************************************************************************//
+// Name   : Konami VRC-5                                                       //
+// Mappers: 5                                                                  //
+// Status : Needs testing, assumed to be complete                              //
+// Notes  :                                                                    //
+// Games  :                                                                    //
+//*****************************************************************************//
+VRC5 vrc5(
+	.clk        (clk),
+	.ce         (ce),
+	.enable     (me[110]),
+	.flags      (flags),
+	.prg_ain    (prg_ain),
+	.prg_aout_b (prg_addr_b),
+	.prg_read   (prg_read),
+	.prg_write  (prg_write),
+	.prg_din    (prg_din),
+	.prg_dout_b (prg_dout_b),
+	.prg_allow_b(prg_allow_b),
+	.chr_ain    (chr_ain),
+	.chr_aout_b (chr_addr_b),
+	.chr_read   (chr_read),
+	.chr_allow_b(chr_allow_b),
+	.vram_a10_b (vram_a10_b),
+	.vram_ce_b  (vram_ce_b),
+	.irq_b      (irq_b),
+	.flags_out_b(flags_out_b),
+	.audio_in   (audio_in),
+	.audio_b    (audio_out_b),
+	// Special ports
+	.chr_din    (chr_din),
+	.chr_write  (chr_write),
+	.chr_dout_b (chr_dout_b),
+	.ppu_ce     (ppu_ce),
+	.ppuflags   (ppuflags)
+);
+
+//*****************************************************************************//
 // Name   : Konami VRC-6                                                       //
 // Mappers: 24, 26                                                             //
 // Status : Working. Audio needs evaluation. Startup instability.              //
